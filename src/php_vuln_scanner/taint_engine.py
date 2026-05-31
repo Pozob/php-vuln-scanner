@@ -10,13 +10,34 @@ logger = logging.getLogger(__name__)
 
 _CALLABLE_REGEX = re.compile(r"^\w+(::\w+)?$")
 
+# These nodes open a new analysis scope
+_SCOPE_TYPES = {
+    "function_definition",
+    "method_declaration",
+    "anonymous_function_creation_expression",
+    "arrow_function",
+}
+
+_INCLUDE_TYPES = {
+    "include_expression": "include",
+    "include_once_expression": "include_once",
+    "require_expression": "require",
+    "require_once_expression": "require_once",
+}
+
+_NUMERIC_CASTS = {"int", "integer", "float", "double", "real", "bool", "boolean"}
+
 class TaintEngine:
+    """Analyzes parsed files for taint flows according to the TaintModel"""
+
     def __init__(self, model: TaintModel) -> None:
         self._model = model
 
     def analyze_file(self, parsed_file: ParsedFile) -> list[TaintFlow]:
-        # pass for now
-        pass
+        """Return all unsanitized source->sink flows in the file."""
+        analysis = _ScopeAnalyzer(self._model, parsed_file)
+        analysis.visit_scope(parsed_file.root)
+        return analysis.flows
 
 @dataclass(frozen=True)
 class TaintModel:
@@ -27,6 +48,14 @@ class TaintModel:
 
     @classmethod
     def from_dict(cls, data: dict) -> TaintModel:
+        """Build a model from a YAML config
+
+        The config should the following shape:
+            sources: ["$_GET", ...]
+            sinks: {sql: [mysql_query, "PDO::query"], xss: [echo], ...}
+            sanitizers: {sql: [mysqli_real_escape_string], xss: [htmlspecialchars]}
+        """
+
         # sources
         sources = data.get("sources")
         if not isinstance(sources, list) or not all(
@@ -66,7 +95,6 @@ class TaintModel:
 
 def _check_for_string_list(data: dict, key: str) -> dict[str, list[str]]:
     value = data.get(key, {})
-
     if not isinstance(value, dict) or not all(
         isinstance(names, list) and all(isinstance(n, str) for n in names)
         for names in value.values()
@@ -77,6 +105,8 @@ def _check_for_string_list(data: dict, key: str) -> dict[str, list[str]]:
 
 @dataclass(frozen=True)
 class TaintStep:
+    """One single step in a taint. What happend where?"""
+
     line: int
     description: str
 
@@ -90,8 +120,204 @@ class Taint:
 
 @dataclass(frozen=True)
 class TaintFlow:
-    source: str
+    """A completed source->sink flow that no matching sanitizer interrupted"""
+
     sink_type: str
     sink_name: str
+    source: str
     sink_node: Node
     steps: tuple[TaintStep, ...]
+
+    @property
+    def line(self) -> int:
+        return self.sink_node.start_point[0] + 1
+
+
+class _ScopeAnalyzer:
+    def __init__(self, model: TaintModel, parsed_file: ParsedFile) -> None:
+        self._model = model
+        self._parsed_file = parsed_file
+        self.flows: list[TaintFlow] = []
+        self._track: dict[str, Taint] = {}
+
+    def visit_scope(self, scope_root: Node) -> None:
+        """Analyze one scope"""
+        nested: list[Node] = []
+        self._track = {}
+        self._visit(scope_root, nested, is_scope_root=True)
+        for scope in nested:
+            self.visit_scope(scope)
+
+    def _visit(self, node: Node, nested: list[Node], is_scope_root: bool = False) -> None:
+        if node.type in _SCOPE_TYPES and not is_scope_root:
+            nested.append(node)
+            return
+        if node.type in ("assignment_expression", "augmented_assignment_expression"):
+            self._handle_assignment(node)
+            return
+        if node.type == "echo_statement":
+            for child in node.named_children:
+                self._check_sink_args("echo", [child])
+            return
+        if self._is_evaluable(node):
+            self._eval(node)
+            return
+        for child in node.children:
+            self._visit(child, nested)
+
+    @staticmethod
+    def _is_evaluable(node: Node) -> bool:
+        return node.type in (
+            "function_call_expression",
+            "member_call_expression",
+            "print_intrinsic",
+            "shell_command_expression",
+            "encapsed_string",
+        ) or node.type in _INCLUDE_TYPES
+
+    # region assignment handling
+    def _handle_assignment(self, node: Node) -> None:
+        # Assignment handling: $left = $right;
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+
+        if right is None:
+            return
+
+        taint = self._eval(right)
+
+        if left is None or left.type != "variable_name":
+            return
+        var = self._parsed_file.text(left)
+
+        if node.type == "augmented_assignment_expression":
+            taint = _merge(self._track.get(var), taint)
+
+        if taint is None:
+            self._track.pop(var, None)  # overwritten with clean data: taint is killed
+        else:
+            step = TaintStep(self._parsed_file.line(node), f"tainted value assigned to {var}")
+            self._track[var] = Taint(taint.source, taint.steps + (step,), taint.sanitized_for)
+    # endregion
+    # region expression evaluation
+    def _eval(self, node: Node) -> Taint | None:
+        handler = getattr(self, f"_eval_{node.type}", None)
+        if handler is not None:
+            return handler(node)
+        if node.type in _INCLUDE_TYPES:
+            args = node.named_children
+            return self._check_sink_args(_INCLUDE_TYPES[node.type], args)
+        return _merge(*(self._eval(child) for child in node.named_children))
+
+    def _eval_variable_name(self, node: Node) -> Taint | None:
+        name = self._parsed_file.text(node)
+        if name in self._model.sources:
+            return self._new_source_taint(name, node)
+        return self._track.get(name)
+
+    def _eval_subscript_expression(self, node: Node) -> Taint | None:
+        base = node.named_children[0] if node.named_children else None
+        if base is not None and base.type == "variable_name":
+            name = self._parsed_file.text(base)
+            if name in self._model.sources:
+                return self._new_source_taint(name, node)
+            return self._track.get(name)
+        return _merge(*(self._eval(child) for child in node.named_children))
+
+    def _eval_binary_expression(self, node: Node) -> Taint | None:
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        operator = node.child_by_field_name("operator")
+
+        left_taint = self._eval(left) if left is not None else None
+        right_taint = self._eval(right) if right is not None else None
+        if operator is not None and operator.type == ".":
+            return _merge(left_taint, right_taint)
+        return None
+
+    def _eval_encapsed_string(self, node: Node) -> Taint | None:
+        return _merge(*(self._eval(c) for c in node.named_children))
+
+    def _eval_conditional_expression(self, node: Node) -> Taint | None:
+        branches = [node.child_by_field_name("body"), node.child_by_field_name("alternative")]
+        return _merge(*(self._eval(branch) for branch in branches if branch is not None))
+
+    def _eval_cast_expression(self, node: Node) -> Taint | None:
+        cast_type = node.child_by_field_name("type")
+        value = node.child_by_field_name("value")
+        taint = self._eval(value) if value is not None else None
+        if cast_type is not None and self._parsed_file.text(cast_type).lower() in _NUMERIC_CASTS:
+            return None  # numeric cast destroys any payload
+        return taint
+
+    def _eval_print_intrinsic(self, node: Node) -> Taint | None:
+        self._check_sink_args("print", node.named_children)
+        return None
+
+    def _eval_shell_command_expression(self, node: Node) -> Taint | None:
+        return self._check_sink_args("shell_exec", node.named_children, taint_through=True)
+
+    def _eval_function_call_expression(self, node: Node) -> Taint | None:
+        return self._eval_call(node, self._model.sinks)
+
+    def _eval_member_call_expression(self, node: Node) -> Taint | None:
+        return self._eval_call(node, self._model.method_sinks)
+
+    def _eval_call(self, node: Node, sink_map: dict[str, str]) -> Taint | None:
+        name_node = node.child_by_field_name("function") or node.child_by_field_name("name")
+        arguments = node.child_by_field_name("arguments")
+
+        name = self._parsed_file.text(name_node) if name_node is not None else ""
+        args = arguments.named_children if arguments is not None else []
+        args_taint = _merge(*(self._eval(argument) for argument in args))
+        cleared_types = self._model.sanitizers.get(name)
+
+        if cleared_types is not None:
+            if args_taint is None:
+                return None
+            step = TaintStep(self._parsed_file.line(node), f"sanitized for {'/'.join(sorted(cleared_types))} by {name}()")
+            return Taint(args_taint.source, args_taint.steps + (step,), args_taint.sanitized_for | cleared_types)
+
+        sink_type = sink_map.get(name)
+        if sink_type is not None:
+            self._report(sink_type, name, args_taint, node)
+            return None
+
+        return args_taint
+
+    # endregion
+    # region sinks
+
+    def _check_sink_args(
+        self, sink_name: str, args: list[Node], taint_through: bool = False
+    ) -> Taint | None:
+        taint = _merge(*(self._eval(argument) for argument in args))
+        sink_type = self._model.sinks.get(sink_name)
+        if sink_type is not None and args:
+            self._report(sink_type, sink_name, taint, args[0].parent or args[0])
+        return taint if taint_through else None
+
+    # endregion
+
+    def _report(self, sink_type: str, sink_name: str, taint: Taint | None, node: Node) -> None:
+        if taint is None or sink_type in taint.sanitized_for:
+            return
+        step = TaintStep(self._parsed_file.line(node), f"reaches {sink_type} sink {sink_name}")
+        self.flows.append(
+            TaintFlow(sink_type, sink_name, taint.source, node, taint.steps + (step,))
+        )
+
+    def _new_source_taint(self, source: str, node: Node) -> Taint:
+        step = TaintStep(self._parsed_file.line(node), f"user input from {source}")
+        return Taint(source=source, steps=(step,))
+
+
+def _merge(*taints: Taint | None) -> Taint | None:
+    """Combines expression taints and stays tainted if any part of the expression is tainted
+    A sink is only sanitized if every tainted part of it was sanitized"""
+    present = [taint for taint in taints if taint is not None]
+    if not present:
+        return None
+    sanitized = frozenset.intersection(*(t.sanitized_for for t in present))
+    first = present[0]
+    return Taint(first.source, first.steps, sanitized)
