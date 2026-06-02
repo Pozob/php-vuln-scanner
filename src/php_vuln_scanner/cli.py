@@ -5,12 +5,13 @@ import argparse
 import logging
 from pathlib import Path
 
-from php_vuln_scanner.config import load_core_config
-from php_vuln_scanner.file_finder import find_php_files
-from php_vuln_scanner.file_parser import ParsingService
+from php_vuln_scanner.findings import Severity
+from php_vuln_scanner.module_loader import discover_modules
+from php_vuln_scanner.scanner import default_modules_dir, run_scan
 
 EXIT_CLEAN = 0
 EXIT_ERROR = 1
+EXIT_FINDINGS = 2
 
 def config_arguemnt_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -53,38 +54,61 @@ def config_arguemnt_parser() -> argparse.ArgumentParser:
     return parser
 
 def cmd_scan(args: argparse.Namespace) -> int:
+    """Run a full scan"""
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
         format="%(levelname)s: %(message)s",
     )
+
     if not args.target.exists():
-        print(f"error: target does not exist: {args.target}", file=sys.stderr)
+        print(f"error: target path does not exist: {args.target}", file=sys.stderr)
         return EXIT_ERROR
 
+    only = {module.strip() for module in args.modules.split(",") if module.strip()} if args.modules else None
     try:
-        config = load_core_config(args.config_dir)
+        result = run_scan(args.target, config_dir=args.config_dir, only_modules=only)
     except ValueError as exc:
         print(f"error: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    scan_root = args.target if args.target.is_dir() else args.target.parent
-    files = find_php_files(args.target, config)
-    parsed = ParsingService().parse_files(files, scan_root)
-    with_errors = [parsed_file for parsed_file in parsed if parsed_file.has_parse_errors]
+    with_errors = [parsed_file for parsed_file in result.parsed_files if parsed_file.has_parse_errors]
+    print(f"php vuln scanner - scanned '{args.target}'")
+    print(f"PHP files found:  {len(result.files)}")
+    print(f"parsed:           {len(result.parsed_files)}"
+       + (f"({len(with_errors)} with syntax errors)" if with_errors else ""))
+    print(f"modules run:      {', '.join(m.manifest.id for m in result.modules) or 'none'}")
 
-    print(f"scanned '{args.target}'")
-    print(f"PHP files found:  {len(files)}")
-    print(f"parsed:           {len(parsed)}"
-          + (f" ({len(with_errors)} with syntax errors)" if with_errors else ""))
-    if args.verbose:
-        for parsed_file in parsed:
-            marker = " [syntax errors]" if parsed_file.has_parse_errors else ""
-            print(f"{parsed_file.rel_path}{marker}")
-    return EXIT_CLEAN
+    counts = {sev: sum(1 for f in result.findings if f.severity == sev) for sev in Severity}
+    summary = ", ".join(f"{sev}: {n}" for sev, n in counts.items() if n)
+    print(f"findings:         {len(result.findings)}" + (f" ({summary})" if summary else ""))
 
+    for severity in Severity:
+        group = [finding for finding in result.findings if finding.severity == severity]
+        if not group:
+            continue
+        print(f"\n{severity} severity:")
+        for finding in group:
+            print(f"  {finding.file}:{finding.line}  {finding.rule_id}  {finding.message}")
+            if args.verbose:
+                print(f"snippet:     {finding.snippet}")
+                print(f"remediation: {finding.remediation}")
+                for step in finding.taint_trace or ():
+                    print(f"trace: line {step.line}: {step.description}")
+
+    return EXIT_FINDINGS if result.findings else EXIT_CLEAN
 
 def cmd_list_modules() -> int:
-    print("No modules discovered")
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    modules = discover_modules(default_modules_dir(), Path("config"))
+    if not modules:
+        print("No modules discovered.")
+        return EXIT_CLEAN
+    for module in modules:
+        manifest = module.manifest
+        type = "taint-based" if manifest.requires_taint_engine else "pattern-based"
+        print(f"{manifest.id}  v{manifest.version}  {manifest.owasp_category}  {type}")
+        print(f"{manifest.name} - {manifest.description}")
+        print(f"rules: {', '.join(rule.rule_id for rule in module.instance.rules())}")
     return EXIT_CLEAN
 
 
