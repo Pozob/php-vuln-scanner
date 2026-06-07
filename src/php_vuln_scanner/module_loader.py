@@ -5,6 +5,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+
 import yaml
 
 from php_vuln_scanner.findings import Rule
@@ -19,10 +20,10 @@ _REQUIRED_MANIFEST_KEYS = (
     "owasp_category",
     "description",
     "entry_point",
-    "config_file",
 )
 
-MANIFEST_FILENAME = "module.yaml"
+MODULE_MANIFEST_FILENAME = "module.yaml"
+MODULE_CONFIG_FILENAME = "config.yaml"
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,6 @@ class ModuleManifest:
     owasp_category: str
     description: str
     entry_point: str
-    config_file: str
     requires_taint_engine: bool = False
 
     @classmethod
@@ -75,7 +75,7 @@ def discover_modules(modules_dir: Path, config_dir: Path) -> list[LoadedModule]:
 
     loaded = []
     for entry in sorted(modules_dir.iterdir()):
-        if not entry.is_dir() or not (entry / MANIFEST_FILENAME).is_file():
+        if not entry.is_dir() or not (entry / MODULE_MANIFEST_FILENAME).is_file():
             continue
         try:
             loaded.append(_load_module(entry, config_dir))
@@ -86,11 +86,11 @@ def discover_modules(modules_dir: Path, config_dir: Path) -> list[LoadedModule]:
 
 def _load_module(module_dir: Path, config_dir: Path) -> LoadedModule:
     # Load the manifest and the instance of the module
-    manifest = ModuleManifest.from_file(module_dir / MANIFEST_FILENAME)
+    manifest = ModuleManifest.from_file(module_dir / MODULE_MANIFEST_FILENAME)
     instance = _instantiate_entry_point(module_dir / manifest.entry_point, manifest.id)
 
     _validate_rules(instance, manifest.id)
-    config = _load_module_config(module_dir, config_dir, manifest.config_file)
+    config = _load_module_config(module_dir, config_dir, manifest.id)
 
     return LoadedModule(manifest=manifest, instance=instance, config=config, path=module_dir)
 
@@ -131,17 +131,17 @@ def _validate_rules(instance: ScannerModule, module_id: str) -> None:
         raise ValueError(f"duplicate rule_ids in module {module_id}")
 
 
-def _load_module_config(module_dir: Path, config_dir: Path, config_file: str) -> dict:
+def _load_module_config(module_dir: Path, config_dir: Path, module_id: str) -> dict:
     """Load the module config. It can be loaded from 2 places: in the module
     and in the config folder. If both are present, the config folder takes
     priority.
     """
-    override = config_dir / config_file
-    defaults = module_dir / config_file
+    override = config_dir / f"{module_id}.yaml"
+    defaults = module_dir / MODULE_CONFIG_FILENAME
     path = override if override.is_file() else defaults
 
     if not path.is_file():
-        raise ValueError(f"config file {config_file} not found in module or config dir")
+        raise ValueError(f"no config found: neither {defaults} nor override {override} exists")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     if not isinstance(data, dict):

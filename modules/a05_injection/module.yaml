@@ -5,4 +5,3 @@ owasp_category: "A05:2025"
 description: Detects SQL injection, XSS, command injection, code injection, and file inclusion via taint analysis.
 entry_point: module.py
 requires_taint_engine: true
-config_file: config.yaml

@@ -11,7 +11,6 @@ owasp_category: "A00:2025"
 description: A dummy module for loader tests.
 entry_point: module.py
 requires_taint_engine: false
-config_file: test.yaml
 """
 
 VALID_MODULE = """\
@@ -40,7 +39,7 @@ def write_module(
     module_dir.mkdir(parents=True)
     (module_dir / "module.yaml").write_text(manifest)
     (module_dir / "module.py").write_text(module_py)
-    (module_dir / "test.yaml").write_text(config_yaml)
+    (module_dir / "config.yaml").write_text(config_yaml)
     return module_dir
 
 
@@ -50,7 +49,6 @@ def test_valid_folder_module_loads(tmp_path: Path) -> None:
     assert module.manifest.id == "test"
     assert module.config == {"setting": 1}
     assert [r.rule_id for r in module.instance.rules()] == ["A00-TEST-001"]
-
 
 def test_config_override_wins_over_shipped_defaults(tmp_path: Path) -> None:
     write_module(tmp_path / "modules")
@@ -88,3 +86,9 @@ def test_crashing_entry_point_skips_module_but_others_load(tmp_path: Path, caplo
 def test_non_module_folders_are_ignored(tmp_path: Path) -> None:
     (tmp_path / "modules" / "not_a_module").mkdir(parents=True)
     assert discover_modules(tmp_path / "modules", tmp_path / "config") == []
+
+def test_missing_config_yaml_skips_module(tmp_path: Path, caplog) -> None:
+    module_dir = write_module(tmp_path / "modules")
+    (module_dir / "config.yaml").unlink()
+    assert discover_modules(tmp_path / "modules", tmp_path / "config") == []
+    assert "no config found" in caplog.text
