@@ -1,0 +1,8 @@
+id: a05_injection
+name: Injection (A05:2025)
+version: 0.1.0
+owasp_category: "A05:2025"
+description: Detects SQL injection, XSS, command injection, code injection, and file inclusion via taint analysis.
+entry_point: module.py
+requires_taint_engine: true
+config_file: config.yaml

@@ -1,0 +1,55 @@
+taint_model:
+  sources:
+    - "$_GET"
+    - "$_POST"
+    - "$_REQUEST"
+    - "$_COOKIE"
+    - "$_SERVER"
+    - "$_FILES"
+
+  sinks:
+    sql:
+      - mysqli_query
+      - mysql_query
+      - mysqli_real_query
+      - mysqli_multi_query
+      - PDO::query
+      - PDO::exec
+      - mysqli::query
+      - mysqli::multi_query
+    xss:
+      - echo
+      - print
+      - printf
+    command:
+      - exec
+      - system
+      - shell_exec
+      - passthru
+      - popen
+      - proc_open
+    code:
+      - eval
+      - assert
+    file_inclusion:
+      - include
+      - include_once
+      - require
+      - require_once
+
+  sanitizers:
+    sql:
+      - mysqli_real_escape_string
+      - mysqli::real_escape_string
+      - PDO::quote
+      - intval
+    xss:
+      - htmlspecialchars
+      - htmlentities
+      - intval
+    command:
+      - escapeshellarg
+      - escapeshellcmd
+      - intval
+    file_inclusion:
+      - basename
