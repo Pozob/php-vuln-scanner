@@ -1,0 +1,7 @@
+id: a04_crypto_failures
+name: Cryptographic Failures (A04:2025)
+version: 0.1.0
+owasp_category: "A04:2025"
+description: Finds weak password hashing, weak cipher modes, hardcoded secrets, deprecated crypto APIs and insecure randomness.
+entry_point: module.py
+requires_taint_engine: false

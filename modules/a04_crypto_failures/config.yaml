@@ -1,0 +1,54 @@
+# Hash functions too weak for today
+weak_hash_functions:
+  - md5
+  - sha1
+
+# If the source line of a weak-hash call mentions one of these identifiers,
+# the finding is treated as credential hashing
+password_context_identifiers:
+  - password
+  - passwd
+  - pwd
+  - passphrase
+  - credential
+
+# Not cryptographically secure random functions
+insecure_random_functions:
+  - rand
+  - mt_rand
+  - uniqid
+
+# Any function starting with one of these prefixes is deprecated crypto.
+deprecated_crypto_prefixes:
+  - mcrypt_
+
+# Cipher/mode tokens that indicate broken crypto.
+weak_cipher_indicators:
+  - des
+  - des3
+  - 3des
+  - rc2
+  - rc4
+  - ecb
+
+# crypt() salts starting with one of these prefixes are acceptable
+strong_crypt_salt_prefixes:
+  - "$2a$"
+  - "$2y$"
+  - "$5$"
+  - "$6$"
+  - "$argon"
+
+# Variable names that suggest a secret when assigned a string literal
+secret_variable_identifiers:
+  - password
+  - passwd
+  - pwd
+  - secret
+  - token
+  - apikey
+  - api_key
+  - private_key
+
+# String literals shorter than this are not reported as hardcoded secrets
+min_secret_length: 4
