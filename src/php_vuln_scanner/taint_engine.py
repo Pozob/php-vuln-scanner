@@ -152,6 +152,9 @@ class _ScopeAnalyzer:
         if node.type in _SCOPE_TYPES and not is_scope_root:
             nested.append(node)
             return
+        if node.type == "if_statement":
+            self._handle_if(node, nested)
+            return
         if node.type in ("assignment_expression", "augmented_assignment_expression"):
             self._handle_assignment(node)
             return
@@ -175,6 +178,34 @@ class _ScopeAnalyzer:
             "encapsed_string",
         ) or node.type in _INCLUDE_TYPES
 
+    # region if
+    def _handle_if(self, node: Node, nested: list[Node]) -> None:
+        """Analyze every branch from the same entry state and join the results.
+
+        Without this every branch would write into one shared state and the last
+        one in source order would win, wiping out the taint of earlier branches.
+        """
+        condition = node.child_by_field_name("condition")
+        if condition is not None:
+            self._visit(condition, nested)  # the condition itself may hold a sink
+
+        branches = [node.child_by_field_name("body")]
+        branches += list(node.children_by_field_name("alternative"))  # elseif / else
+
+        entry = dict(self._track)
+        outcomes: list[dict[str, Taint]] = []
+        for branch in branches:
+            if branch is None:
+                continue
+            self._track = dict(entry)
+            self._visit(branch, nested)
+            outcomes.append(self._track)
+        if not any(branch is not None and branch.type == "else_clause" for branch in branches):
+            outcomes.append(entry)  # without an else the whole statement may be skipped
+
+        self._track = _join(outcomes)
+
+    # endregion
     # region assignment handling
     def _handle_assignment(self, node: Node) -> None:
         # Assignment handling: $left = $right;
@@ -311,6 +342,15 @@ class _ScopeAnalyzer:
         step = TaintStep(self._parsed_file.line(node), f"user input from {source}")
         return Taint(source=source, steps=(step,))
 
+def _join(states: list[dict[str, Taint]]) -> dict[str, Taint]:
+    """Joins the states of alternative control-flow paths at their merge point
+    A variable stays tainted if any of the incoming paths taints it"""
+    joined: dict[str, Taint] = {}
+    for name in {name for state in states for name in state}:
+        taint = _merge(*(state.get(name) for state in states))
+        if taint is not None:
+            joined[name] = taint
+    return joined
 
 def _merge(*taints: Taint | None) -> Taint | None:
     """Combines expression taints and stays tainted if any part of the expression is tainted

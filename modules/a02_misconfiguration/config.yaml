@@ -1,0 +1,29 @@
+# debug/developer and error information are enabled with these ini keys set to true
+debug_ini_flags:
+  - display_errors
+  - display_startup_errors
+
+# error_reporting() arguments that can leak unnecessary information
+debug_error_reporting_constants:
+  - E_ALL
+
+# ini session keys that weaken session security when not enabled
+session_hardening_ini_flags:
+  - session.cookie_httponly
+  - session.cookie_secure
+  - session.use_strict_mode
+  - session.use_only_cookies
+
+# ini keys that are dangerous to be enabled
+dangerous_ini_enable_flags:
+  - allow_url_include
+  - register_globals
+
+# curl options that should always be enabled
+tls_verify_options:
+  - CURLOPT_SSL_VERIFYPEER
+  - CURLOPT_SSL_VERIFYHOST
+
+# String values that are considered true / false in ini
+truthy_values: ["1", "true", "on", "yes"]
+falsy_values: ["0", "false", "off", "no", ""]

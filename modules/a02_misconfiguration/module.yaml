@@ -1,0 +1,7 @@
+id: a02_misconfiguration
+name: Security Misconfiguration (A02:2025)
+version: 0.1.0
+owasp_category: "A02:2025"
+description: Detects misconfigurations visible in PHP code like debug output, not secure cookies and sessions, wildcard CORS, disabled TLS verification and ini toggles.
+entry_point: module.py
+requires_taint_engine: false

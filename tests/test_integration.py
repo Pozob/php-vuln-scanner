@@ -26,8 +26,19 @@ EXPECTED_FINDINGS = {
     ("hardcoded_secrets.php", "A04-SECRET-001", 3),
     ("hardcoded_secrets.php", "A04-SECRET-001", 4),
     ("hardcoded_secrets.php", "A04-SECRET-001", 5),
+    # A02
+    ("insecure_random.php", "A02-COOKIE-001", 4),
+    ("debug_toggles.php", "A02-DEBUG-001", 3),
+    ("debug_toggles.php", "A02-DEBUG-001", 4),
+    ("debug_toggles.php", "A02-INI-001", 5),
+    ("insecure_cookies.php", "A02-COOKIE-001", 3),
+    ("insecure_cookies.php", "A02-SESSION-001", 4),
+    ("insecure_cookies.php", "A02-SESSION-001", 5),
+    ("cors_tls.php", "A02-CORS-001", 3),
+    ("cors_tls.php", "A02-TLS-001", 5),
+    ("cors_tls.php", "A02-TLS-001", 6),
 }
-CLEAN_FILES = {"clean_prepared.php", "clean_sanitized.php", "clean_crypto.php",}
+CLEAN_FILES = {"clean_prepared.php", "clean_sanitized.php", "clean_crypto.php", "clean_config.php",}
 
 
 def test_scan_matches_expected_findings() -> None:
@@ -75,6 +86,9 @@ def test_modules_list_shows_all_modules(capsys) -> None:
     assert "a04_crypto_failures" in out
     assert "pattern-based" in out
     assert "A04-HASH-001" in out
+    assert "a02_misconfiguration" in out
+    assert "A02-TLS-001" in out
+
 
 def test_module_filter_selects_single_module() -> None:
     result = run_scan(FIXTURES, modules_dir=MODULES_DIR, only_modules={"a04_crypto_failures"})
