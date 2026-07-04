@@ -9,6 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
 MODULES_DIR = REPO_ROOT / "modules"
 
+# file, rule, line
 EXPECTED_FINDINGS = {
     # A05
     ("sqli_legacy.php", "A05-SQLI-001", 5),

@@ -1,10 +1,12 @@
-import pytest
+from __future__ import annotations
 
+import pytest
 from pathlib import Path
 from php_vuln_scanner.cli import EXIT_CLEAN, EXIT_ERROR, main
 
 
-def test_scan_existing_path_is_clean(tmp_path: Path) -> None:
+def test_scan_existing_path_is_clean(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     assert main(["scan", str(tmp_path)]) == EXIT_CLEAN
 
 

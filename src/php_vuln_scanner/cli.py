@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sys
 import argparse
 import logging
+import sys
 from pathlib import Path
 
-from php_vuln_scanner.findings import Severity
 from php_vuln_scanner.module_loader import discover_modules
+from php_vuln_scanner.reporting import build_report, render_html, render_terminal, write_json_report
 from php_vuln_scanner.scanner import default_modules_dir, run_scan
 
 EXIT_CLEAN = 0
@@ -32,9 +32,10 @@ def config_arguemnt_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--format",
+        "-f",
         choices=["json", "html", "term"],
-        default="term",
-        help="Output format (default: term for terminal. JSON is always written)",
+        action="append",
+        help="Output format (default: term for terminal)",
     )
     scan.add_argument("--output", type=Path, help="Path for the report file")
     scan.add_argument(
@@ -71,29 +72,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
         print(f"error: invalid config: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    with_errors = [parsed_file for parsed_file in result.parsed_files if parsed_file.has_parse_errors]
-    print(f"php vuln scanner - scanned '{args.target}'")
-    print(f"PHP files found:  {len(result.files)}")
-    print(f"parsed:           {len(result.parsed_files)}"
-       + (f"({len(with_errors)} with syntax errors)" if with_errors else ""))
-    print(f"modules run:      {', '.join(m.manifest.id for m in result.modules) or 'none'}")
+    report = build_report(result)
+    target_name = args.target.name or "scan"
 
-    counts = {sev: sum(1 for f in result.findings if f.severity == sev) for sev in Severity}
-    summary = ", ".join(f"{sev}: {n}" for sev, n in counts.items() if n)
-    print(f"findings:         {len(result.findings)}" + (f" ({summary})" if summary else ""))
+    format = args.format or ["term"]
 
-    for severity in Severity:
-        group = [finding for finding in result.findings if finding.severity == severity]
-        if not group:
-            continue
-        print(f"\n{severity} severity:")
-        for finding in group:
-            print(f"  {finding.file}:{finding.line}  {finding.rule_id}  {finding.message}")
-            if args.verbose:
-                print(f"snippet:     {finding.snippet}")
-                print(f"remediation: {finding.remediation}")
-                for step in finding.taint_trace or ():
-                    print(f"trace: line {step.line}: {step.description}")
+    if "json" in format:
+        json_path = args.output if args.output else Path(f"{target_name}.phpscan.json")
+        write_json_report(report, json_path)
+        print(f"JSON report written to {json_path}")
+    if "term" in format:
+        print(render_terminal(result, verbose=args.verbose))
+    if "html" in format:
+        html_path = args.output or Path(f"{target_name}.phpscan.html")
+        html_path.write_text(render_html(report), encoding="utf-8")
+        print(f"HTML report written to {html_path}")
 
     return EXIT_FINDINGS if result.findings else EXIT_CLEAN
 
