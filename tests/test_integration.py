@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import yaml
 
-from php_vuln_scanner.cli import EXIT_CLEAN, EXIT_FINDINGS, main
+from php_vuln_scanner.cli import EXIT_CLEAN, EXIT_FINDINGS, main, EXIT_ERROR
 from php_vuln_scanner.scanner import run_scan
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -94,3 +95,46 @@ def test_modules_list_shows_all_modules(capsys) -> None:
 def test_module_filter_selects_single_module() -> None:
     result = run_scan(FIXTURES, modules_dir=MODULES_DIR, only_modules={"a04_crypto_failures"})
     assert {f.module_id for f in result.findings} == {"a04_crypto_failures"}
+
+def test_cli_modules_publish(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    config_dir = tmp_path / "config"
+    publish_a05_cmd = ["modules", "publish", "a05_injection", "--config-dir", str(config_dir)]
+
+    assert main(publish_a05_cmd) == EXIT_CLEAN
+    published = config_dir / "a05_injection.yaml"
+    shipped = (MODULES_DIR / "a05_injection" / "config.yaml").read_text()
+    assert published.read_text() == shipped
+
+    # does not overwrite existing
+    published.write_text("edited: true\n")
+    assert main(publish_a05_cmd) == EXIT_ERROR
+    assert published.read_text() == "edited: true\n"
+
+    assert main(publish_a05_cmd + ["--force"]) == EXIT_CLEAN
+    assert published.read_text() == shipped
+    capsys.readouterr()
+
+def test_cli_modules_publish_not_existing(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    assert main(["modules", "publish", "not-existing", "--config-dir", str(tmp_path)]) == EXIT_ERROR
+    assert "unknown module" in capsys.readouterr().err
+
+def test_published_config_edit_changes_scan(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    config_dir = tmp_path / "config"
+    assert main(["modules", "publish", "a05_injection", "--config-dir", str(config_dir)]) == EXIT_CLEAN
+    capsys.readouterr()
+
+    published = config_dir / "a05_injection.yaml"
+    config = yaml.safe_load(published.read_text())
+    del config["taint_model"]["sinks"]["xss"] # remove css for the test
+    published.write_text(yaml.safe_dump(config))
+
+    result = run_scan(FIXTURES, config_dir=config_dir, modules_dir=MODULES_DIR,
+                      only_modules={"a05_injection"})
+    rule_ids = {f.rule_id for f in result.findings}
+
+    assert "A05-XSS-001" not in rule_ids  # no xss found
+    assert "A05-SQLI-001" in rule_ids  # everything else works
+

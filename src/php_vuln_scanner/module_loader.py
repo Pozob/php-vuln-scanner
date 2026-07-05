@@ -3,10 +3,9 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
+import yaml
 from dataclasses import dataclass
 from pathlib import Path
-
-import yaml
 
 from php_vuln_scanner.findings import Rule
 from php_vuln_scanner.module_api import ScannerModule
@@ -28,7 +27,7 @@ MODULE_CONFIG_FILENAME = "config.yaml"
 
 @dataclass(frozen=True)
 class ModuleManifest:
-    """Validates the content of a module.yaml"""
+    """Represents a manifest file"""
 
     id: str
     name: str
@@ -65,6 +64,7 @@ class LoadedModule:
     instance: ScannerModule
     config: dict
     path: Path
+    config_defaults_text: str
 
 
 def discover_modules(modules_dir: Path, config_dir: Path) -> list[LoadedModule]:
@@ -92,7 +92,15 @@ def _load_module(module_dir: Path, config_dir: Path) -> LoadedModule:
     _validate_rules(instance, manifest.id)
     config = _load_module_config(module_dir, config_dir, manifest.id)
 
-    return LoadedModule(manifest=manifest, instance=instance, config=config, path=module_dir)
+    defaults_path = module_dir / MODULE_CONFIG_FILENAME
+    defaults_text = defaults_path.read_text(encoding="utf-8") if defaults_path.is_file() else ""
+    return LoadedModule(
+        manifest=manifest,
+        instance=instance,
+        config=config,
+        path=module_dir,
+        config_defaults_text=defaults_text,
+    )
 
 
 def _instantiate_entry_point(entry_path: Path, module_id: str) -> ScannerModule:

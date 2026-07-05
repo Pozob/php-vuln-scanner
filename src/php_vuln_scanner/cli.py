@@ -52,6 +52,23 @@ def config_arguemnt_parser() -> argparse.ArgumentParser:
     modules_sub = modules.add_subparsers(dest="modules_command")
     modules_sub.add_parser("list", help="Show discovered modules and information about them")
 
+    publish = modules_sub.add_parser(
+        "publish",
+        help="Copy a modules default config into the config dir for editing",
+    )
+    publish.add_argument("module_id", help="Id of the module whose config to publish.")
+    publish.add_argument(
+        "--config-dir",
+        type=Path,
+        default=Path("config"),
+        help="Config dir to copy to (default: ./config).",
+    )
+    publish.add_argument(
+        "--force",
+        action="store_true",
+        help="Force the write of the config file",
+    )
+
     return parser
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -104,6 +121,31 @@ def cmd_list_modules() -> int:
         print(f"rules: {', '.join(rule.rule_id for rule in module.instance.rules())}")
     return EXIT_CLEAN
 
+def cmd_modules_publish(args: argparse.Namespace) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    modules = discover_modules(default_modules_dir(), args.config_dir)
+    module = next((mod for mod in modules if mod.manifest.id == args.module_id), None)
+
+    if module is None:
+        known = ", ".join(mod.manifest.id for mod in modules) or "none"
+        print(f"error: unknown module '{args.module_id}' (available are: {known})", file=sys.stderr)
+        return EXIT_ERROR
+
+    destination = args.config_dir / f"{module.manifest.id}.yaml"
+    if destination.exists() and not args.force:
+        print(
+            f"error: {destination} already exists. Edit it or pass --force to overwrite",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    args.config_dir.mkdir(parents=True, exist_ok=True)
+    destination.write_text(module.config_defaults_text, encoding="utf-8")
+
+    print(f"published config of '{module.manifest.id}' to {destination}")
+    print("Edit this file to customize the module. It replaces the default config")
+
+    return EXIT_CLEAN
 
 def main(argv: list[str] | None = None) -> int:
     parser = config_arguemnt_parser()
@@ -114,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "modules":
         if args.modules_command == "list":
             return cmd_list_modules()
+        if args.modules_command == "publish":
+            return cmd_modules_publish(args)
         parser.parse_args(["modules", "--help"])
         return EXIT_ERROR
     parser.print_help()
