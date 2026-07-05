@@ -18,6 +18,7 @@ EXPECTED_FINDINGS = {
     ("cmd_injection.php", "A05-CMD-001", 4),
     ("include_eval.php", "A05-FILE-001", 4),
     ("include_eval.php", "A05-CODE-001", 5),
+    ("file_upload.php", "A05-SQLI-001", 4),
     # A04
     ("weak_hash.php", "A04-HASH-001", 3),
     ("weak_hash.php", "A04-HASH-001", 5),
@@ -41,6 +42,20 @@ EXPECTED_FINDINGS = {
     ("cors_tls.php", "A02-TLS-001", 6),
 }
 CLEAN_FILES = {"clean_prepared.php", "clean_sanitized.php", "clean_crypto.php", "clean_config.php",}
+
+# These files contain code, that should be flagged, however the scanner in its current form
+# does not find these
+FALSE_NEGATIVE_FILES = {
+    "FN_interprocedural.php",
+    "FN_object_property.php",
+    "FN_db_save.php",
+    "FN_cross_file_input.php",
+    "FN_cross_file_query.php",
+    "FN_dynamic_hash.php",
+    "FN_encoded_secret.php",
+    "FN_dynamic_misconfig.php",
+}
+
 
 
 def test_scan_matches_expected_findings() -> None:
@@ -137,4 +152,18 @@ def test_published_config_edit_changes_scan(tmp_path: Path, monkeypatch, capsys)
 
     assert "A05-XSS-001" not in rule_ids  # no xss found
     assert "A05-SQLI-001" in rule_ids  # everything else works
+
+def test_known_false_negatives_stay_undetected() -> None:
+    result = run_scan(FIXTURES, modules_dir=MODULES_DIR)
+    flagged = {finding.file for finding in result.findings} & FALSE_NEGATIVE_FILES
+    assert flagged == set(), (
+        f"somehow found a finding in {flagged}, that should have not been found"
+    )
+
+
+def test_php_ini_is_not_scanned() -> None:
+    assert (FIXTURES / "php.ini").is_file()
+    result = run_scan(FIXTURES, modules_dir=MODULES_DIR)
+    assert "php.ini" not in {p.name for p in result.files}
+    assert "php.ini" not in {f.file for f in result.findings}
 

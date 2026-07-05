@@ -52,7 +52,7 @@ def test_report_findings_follow_schema(report) -> None:
     finding = next(f for f in report["findings"] if f["rule_id"] == "A05-SQLI-001")
     assert finding["cwe"] == "CWE-89"
     assert finding["severity"] == "high"
-    assert finding["file"] == "sqli_legacy.php"
+    assert finding["file"] == "file_upload.php"
     assert finding["remediation"]
     assert finding["taint_trace"][0]["description"].startswith("user input")
 
