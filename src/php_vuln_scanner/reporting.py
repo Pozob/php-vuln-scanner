@@ -139,7 +139,7 @@ _HTML_PAGE_TEMPLATE = """<!DOCTYPE html>
 <tr><td>Scanned at</td><td>{timestamp}</td></tr>
 <tr><td>Scanner</td><td>PHP-Vuln-Scanner (phpscan) {version}</td></tr>
 <tr><td>Modules</td><td>{modules}</td></tr>
-<tr><td>Files</td><td>{files_found} found, {files_parsed} parsed</td></tr>
+<tr><td>Files</td><td>{files_found} found, {files_parsed} parsed, {parse_errors} with parsing errors</td></tr>
 <tr><td>Findings</td><td>{summary}</td></tr>
 </table></div>
 {findings}
@@ -199,6 +199,7 @@ def render_html(report: dict) -> str:
         ),
         files_found=report["files"]["found"],
         files_parsed=report["files"]["parsed"],
+        parse_errors=len(report["files"]["with_parse_errors"]),
         summary=html.escape(summary),
         findings="\n".join(findings_html),
     )

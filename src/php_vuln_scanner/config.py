@@ -33,7 +33,11 @@ def load_core_config(config_dir: Path) -> CoreConfig:
     if not override_path.is_file():
         return config
 
-    custom_config = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    try:
+        custom_config = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{override_path} is not a valid YAML file.") from exc
+
     if custom_config is None:
         return config
     if not isinstance(custom_config, dict):

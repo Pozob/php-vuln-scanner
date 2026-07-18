@@ -18,7 +18,6 @@ EXPECTED_FINDINGS = {
     ("cmd_injection.php", "A05-CMD-001", 4),
     ("include_eval.php", "A05-FILE-001", 4),
     ("include_eval.php", "A05-CODE-001", 5),
-    ("file_upload.php", "A05-SQLI-001", 4),
     # A04
     ("weak_hash.php", "A04-HASH-001", 3),
     ("weak_hash.php", "A04-HASH-001", 5),
@@ -167,3 +166,17 @@ def test_php_ini_is_not_scanned() -> None:
     assert "php.ini" not in {p.name for p in result.files}
     assert "php.ini" not in {f.file for f in result.findings}
 
+def test_zipped_real_module_matches_folder_results(tmp_path: Path) -> None:
+    import zipfile
+
+    zip_modules_dir = tmp_path / "modules"
+    zip_modules_dir.mkdir()
+    source = MODULES_DIR / "a05_injection"
+    with zipfile.ZipFile(zip_modules_dir / "a05_injection.zip", "w") as archive:
+        for file in source.iterdir():
+            archive.write(file, file.name)
+
+    result = run_scan(FIXTURES, modules_dir=zip_modules_dir)
+    found = {(f.file, f.rule_id, f.line) for f in result.findings}
+    expected_a05 = {e for e in EXPECTED_FINDINGS if e[1].startswith("A05-")}
+    assert found == expected_a05

@@ -94,16 +94,20 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     format = args.format or ["term"]
 
-    if "json" in format:
-        json_path = args.output if args.output else Path(f"{target_name}.phpscan.json")
-        write_json_report(report, json_path)
-        print(f"JSON report written to {json_path}")
-    if "term" in format:
-        print(render_terminal(result, verbose=args.verbose))
-    if "html" in format:
-        html_path = args.output or Path(f"{target_name}.phpscan.html")
-        html_path.write_text(render_html(report), encoding="utf-8")
-        print(f"HTML report written to {html_path}")
+    try:
+        if "json" in format:
+            json_path = args.output if args.output else Path(f"{target_name}.phpscan.json")
+            write_json_report(report, json_path)
+            print(f"JSON report written to {json_path}")
+        if "term" in format:
+            print(render_terminal(result, verbose=args.verbose))
+        if "html" in format:
+            html_path = args.output or Path(f"{target_name}.phpscan.html")
+            html_path.write_text(render_html(report), encoding="utf-8")
+            print(f"HTML report written to {html_path}")
+    except OSError as exc:
+        print(f"cannot write report: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
     return EXIT_FINDINGS if result.findings else EXIT_CLEAN
 
