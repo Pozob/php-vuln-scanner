@@ -71,6 +71,8 @@ class TaintModel:
                 if not _CALLABLE_REGEX.match(name):
                     raise ValueError(f"taint model: sink entry {name!r} is not a callable name")
                 if "::" in name:
+                    # We do not resolve the class of an object at runtime, so a "Class::method" will be matched
+                    # just on the function name. So "PDO::query" would matches $foo->query()
                     method_sinks[name.split("::")[1]] = sink_type
                 else:
                     sinks[name] = sink_type
@@ -82,6 +84,7 @@ class TaintModel:
                 if not _CALLABLE_REGEX.match(name):
                     logger.debug("taint model: ignoring descriptive sanitizer entry %r", name)
                     continue
+                # Same as for sinks: only the bare callable name is matched.
                 callable_name = name.split("::")[-1]
                 sanitizers.setdefault(callable_name, set()).add(sink_type)
 
@@ -113,6 +116,11 @@ class TaintStep:
 
 @dataclass(frozen=True)
 class Taint:
+    """Taint carried by a value and how it ended up here
+
+    ``sanitized_for`` holds the sink types this value is already safe for
+    """
+
     source: str  # the source like "$_GET"
     steps: tuple[TaintStep, ...]
     sanitized_for: frozenset[str] = frozenset()
@@ -138,10 +146,16 @@ class _ScopeAnalyzer:
         self._model = model
         self._parsed_file = parsed_file
         self.flows: list[TaintFlow] = []
+        # Taint state of the scope currently being analyzed with: variable name -> taint.
+        # If a varibale is not set, it is considered clean
         self._track: dict[str, Taint] = {}
 
     def visit_scope(self, scope_root: Node) -> None:
-        """Analyze one scope"""
+        """Analyze one scope.
+
+        Each scope gets a fresh taint state. Nested scopes are collected during the
+        walk and analyzed afterwards.
+        """
         nested: list[Node] = []
         self._track = {}
         self._visit(scope_root, nested, is_scope_root=True)
@@ -149,6 +163,12 @@ class _ScopeAnalyzer:
             self.visit_scope(scope)
 
     def _visit(self, node: Node, nested: list[Node], is_scope_root: bool = False) -> None:
+        """Walk statements in order and update the taint state.
+
+        Every branch below returns instead of falling through to the generic
+        child walk, because the respective handler already consumed the whole
+        subtree
+        """
         if node.type in _SCOPE_TYPES and not is_scope_root:
             nested.append(node)
             return
@@ -163,6 +183,7 @@ class _ScopeAnalyzer:
                 self._check_sink_args("echo", [child])
             return
         if self._is_evaluable(node):
+            # Expression in statement position like a bare call, echo-like output, a include
             self._eval(node)
             return
         for child in node.children:
@@ -183,7 +204,7 @@ class _ScopeAnalyzer:
         """Analyze every branch from the same entry state and join the results.
 
         Without this every branch would write into one shared state and the last
-        one in source order would win, wiping out the taint of earlier branches.
+        one in source order would win, wiping out the taint of earlier branches
         """
         condition = node.child_by_field_name("condition")
         if condition is not None:
@@ -208,7 +229,7 @@ class _ScopeAnalyzer:
     # endregion
     # region assignment handling
     def _handle_assignment(self, node: Node) -> None:
-        # Assignment handling: $left = $right;
+        """Propagate the taint of the right-hand side onto the assigned variable."""
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
 
@@ -217,11 +238,15 @@ class _ScopeAnalyzer:
 
         taint = self._eval(right)
 
+        # Only plain variables are tracked. For anything else like array, object or
+        # variable variables drop the write. the right-hand side was still evaluated
+        # above, so sinks in it are reported
         if left is None or left.type != "variable_name":
             return
         var = self._parsed_file.text(left)
 
         if node.type == "augmented_assignment_expression":
+            # "$a .= $b" keeps whatever $a already carried, so the old state of the variable is part of the result.
             taint = _merge(self._track.get(var), taint)
 
         if taint is None:
@@ -232,6 +257,11 @@ class _ScopeAnalyzer:
     # endregion
     # region expression evaluation
     def _eval(self, node: Node) -> Taint | None:
+        """Return the taint an expression evaluates to or none if clean
+
+        Handlers are looked up by node type ("_eval_<type>"). Node types  without a handler fall back to
+        the merge of their children, which is the safe default for the many wrapper nodes taht tree-sitter produces
+        """
         handler = getattr(self, f"_eval_{node.type}", None)
         if handler is not None:
             return handler(node)
@@ -247,6 +277,11 @@ class _ScopeAnalyzer:
         return self._track.get(name)
 
     def _eval_subscript_expression(self, node: Node) -> Taint | None:
+        """Taint of "$arr[...]" is the taint of the array itself.
+
+        Indices are deliberately not distinguished: "$_GET['id']" is tainted because "$_GET"
+        is a source, and a tainted "$data" makes every "$data[...]" tainted
+        """
         base = node.named_children[0] if node.named_children else None
         if base is not None and base.type == "variable_name":
             name = self._parsed_file.text(base)
@@ -262,6 +297,8 @@ class _ScopeAnalyzer:
 
         left_taint = self._eval(left) if left is not None else None
         right_taint = self._eval(right) if right is not None else None
+        # Only string concatenation carries a payload through. Math operations and comparisons produce
+        # numbers/booleans, which cannot transport an injection, so their result is treated as clean.
         if operator is not None and operator.type == ".":
             return _merge(left_taint, right_taint)
         return None
@@ -270,6 +307,7 @@ class _ScopeAnalyzer:
         return _merge(*(self._eval(c) for c in node.named_children))
 
     def _eval_conditional_expression(self, node: Node) -> Taint | None:
+        # "$a ? $b : $c" can yield either branch, so the result is tainted if either one is.
         branches = [node.child_by_field_name("body"), node.child_by_field_name("alternative")]
         return _merge(*(self._eval(branch) for branch in branches if branch is not None))
 
@@ -286,6 +324,8 @@ class _ScopeAnalyzer:
         return None
 
     def _eval_shell_command_expression(self, node: Node) -> Taint | None:
+        # Backticks are a sink, but unlike echo/print they also have a value (the command output),
+        # which stays tainted, so ->taint_through.
         return self._check_sink_args("shell_exec", node.named_children, taint_through=True)
 
     def _eval_function_call_expression(self, node: Node) -> Taint | None:
@@ -295,6 +335,10 @@ class _ScopeAnalyzer:
         return self._eval_call(node, self._model.method_sinks)
 
     def _eval_call(self, node: Node, sink_map: dict[str, str]) -> Taint | None:
+        """Evaluate a call: sanitizer, sink, or plain taint propagation.
+
+        The arguments are evaluated first so that sinks nested inside them are reported regardless
+        """
         name_node = node.child_by_field_name("function") or node.child_by_field_name("name")
         arguments = node.child_by_field_name("arguments")
 
@@ -305,15 +349,17 @@ class _ScopeAnalyzer:
 
         if cleared_types is not None:
             if args_taint is None:
-                return None
+                return None  # nothing tainted went in, so nothing to mark as cleared
             step = TaintStep(self._parsed_file.line(node), f"sanitized for {'/'.join(sorted(cleared_types))} by {name}()")
             return Taint(args_taint.source, args_taint.steps + (step,), args_taint.sanitized_for | cleared_types)
 
         sink_type = sink_map.get(name)
         if sink_type is not None:
             self._report(sink_type, name, args_taint, node)
-            return None
+            return None  # we dont track the returnvalue of a sink
 
+        # Unknown function: pass the argument taint through. This keeps flows through wrappers and unmodelled
+        # helpers visible at the cost of false positives for functions that actually neutralize their input.
         return args_taint
 
     # endregion
@@ -322,6 +368,11 @@ class _ScopeAnalyzer:
     def _check_sink_args(
         self, sink_name: str, args: list[Node], taint_through: bool = False
     ) -> Taint | None:
+        """Report a sink that is a language construct
+
+        echo, print, backticks and include/require have no call node, so the sink name is passed
+        in by the caller and looked up in the normal sink map
+        """
         taint = _merge(*(self._eval(argument) for argument in args))
         sink_type = self._model.sinks.get(sink_name)
         if sink_type is not None and args:
@@ -331,6 +382,11 @@ class _ScopeAnalyzer:
     # endregion
 
     def _report(self, sink_type: str, sink_name: str, taint: Taint | None, node: Node) -> None:
+        """Record a finding unless the value is clean or already sanitized here.
+
+        Sanitization is checked per sink type. example: htmlspecialchars() clears "xss" but the same
+        value reaching an "sql" sink is still reported
+        """
         if taint is None or sink_type in taint.sanitized_for:
             return
         step = TaintStep(self._parsed_file.line(node), f"reaches {sink_type} sink {sink_name}")
@@ -358,6 +414,9 @@ def _merge(*taints: Taint | None) -> Taint | None:
     present = [taint for taint in taints if taint is not None]
     if not present:
         return None
+    # Using intersection and not union: "htmlspecialchars($a) . $b" because is only safe for the sink
+    # types that *both* parts are safe for, since $b reaches the sink raw.
     sanitized = frozenset.intersection(*(t.sanitized_for for t in present))
+    # Only one representative trace is kept.
     first = present[0]
     return Taint(first.source, first.steps, sanitized)
