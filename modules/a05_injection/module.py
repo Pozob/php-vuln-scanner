@@ -64,18 +64,23 @@ RULES_BY_SINK_TYPE: dict[str, Rule] = {
     ),
 }
 
-
+# Unlike the pattern based modules this one owns no detection logic of its own
+# the taint engine finds the flows and this module only turns them into findings
 class A05InjectionModule(ScannerModule):
     def rules(self) -> list[Rule]:
         return list(RULES_BY_SINK_TYPE.values())
 
     def analyze(self, parsed_files: list[ParsedFile], context: ModuleContext) -> list[Finding]:
-        # create the taint engine
+        # Sources, sinks and sanitizers all come from the module config, so the
+        # engine is built per run and only knows what the config declares
         engine = context.create_taint_engine(context.config["taint_model"])
         findings: list[Finding] = []
 
         for parsed_file in parsed_files:
             for flow in engine.analyze_file(parsed_file):
+                # The config can declare a sink type this module has no rule
+                # for. That is a configuration mistake, so the taint flow is
+                # logged and dropped instead of raising
                 rule = RULES_BY_SINK_TYPE.get(flow.sink_type)
                 if rule is None:
                     logger.warning(
@@ -92,7 +97,7 @@ class A05InjectionModule(ScannerModule):
                         line=flow.line,
                         column=flow.sink_node.start_point[1] + 1,
                         snippet=parsed_file.snippet(flow.sink_node),
-                        taint_trace=flow.steps,
+                        taint_trace=flow.steps, # The step trace is what makes the finding stiches the flow togetger.
                     )
                 )
         return findings

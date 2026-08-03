@@ -18,6 +18,7 @@ EXPECTED_FINDINGS = {
     ("cmd_injection.php", "A05-CMD-001", 4),
     ("include_eval.php", "A05-FILE-001", 4),
     ("include_eval.php", "A05-CODE-001", 5),
+    ("file_upload.php", "A05-SQLI-001", 4),
     # A04
     ("weak_hash.php", "A04-HASH-001", 3),
     ("weak_hash.php", "A04-HASH-001", 5),

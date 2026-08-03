@@ -75,11 +75,16 @@ RULES: dict[str, Rule] = {
 }
 
 _CALLS_QUERY = "(function_call_expression function: (name) @fn) @call"
+
 _ASSIGN_QUERY = (
     "(assignment_expression"
     " left: [(variable_name) (subscript_expression)] @left"
     " right: [(string) (encapsed_string)] @value) @assign"
 )
+
+# Splits a cipher string into its parts, so "aes-256-ecb" becomes the tokens
+# aes, 256 and ecb. We do this, because comparing whole tokens instead of substrings
+# prevents a match on an unrelated string that just contains a substring of it.
 _TOKEN_REGEX = re.compile(r"[^a-z0-9]+")
 
 
@@ -100,6 +105,11 @@ def _string_content(parsed_file: ParsedFile, node: Node) -> str:
 
 
 def _contains_variable(node: Node) -> bool:
+    """True if an interpolated string embeds a variable somewhere
+
+    Used to tell a real literal apart from a string that is only partly static:
+    "secret_$env" is built at runtime and is neither a hardcoded secret nor a salt
+    """
     if node.type == "variable_name":
         return True
 
@@ -107,6 +117,7 @@ def _contains_variable(node: Node) -> bool:
 
 
 def _call_args(call: Node) -> list[Node]:
+    """Return the argument expressions of a call, unwrapped from their "argument" nodes"""
     arguments = call.child_by_field_name("arguments")
     args = arguments.named_children if arguments is not None else []
 
@@ -118,6 +129,7 @@ class A04CryptoFailuresModule(ScannerModule):
         return list(RULES.values())
 
     def analyze(self, parsed_files: list[ParsedFile], context: ModuleContext) -> list[Finding]:
+        # load the config
         cfg = context.config
 
         self._weak_hashes = set(_cfg_list(cfg, "weak_hash_functions"))
@@ -138,11 +150,17 @@ class A04CryptoFailuresModule(ScannerModule):
     # region fucntion call checks
 
     def _check_calls(self, parsed_file: ParsedFile, context: ModuleContext, findings: list[Finding]) -> None:
+        """Check every call against the crypto rules
+
+        A call can only violate one of the rules
+        """
         for match in context.parsing.matches(parsed_file.root, _CALLS_QUERY):
             call, fn = match["call"][0], match["fn"][0]
             name = parsed_file.text(fn)
 
             if name in self._weak_hashes:
+                # We always report a unsafe hash, but hashing credentials
+                # with it is a more severe finding, so the two cases get different rules.
                 key = "password_hash" if self._in_password_context(parsed_file, call) else "weak_hash"
                 findings.append(self._finding(key, parsed_file, context, call))
             elif name == "crypt" and self._crypt_salt_is_weak(parsed_file, call):
@@ -157,17 +175,27 @@ class A04CryptoFailuresModule(ScannerModule):
                 self._check_define_secret(parsed_file, context, call, findings)
 
     def _in_password_context(self, parsed_file: ParsedFile, call: Node) -> bool:
-        """Checks if the password context is weak or insecure"""
+        """Guesses whether a hash call operates on a credential
+
+        Whether a value is a password cannot be decided from the AST,
+        so this falls back to the wording of the source line the call sits on
+        (md5($password), $row['passwd'], ...).
+        It is only a guess, so it misses credentials stored under an unrelated name,
+        and it triggers on any line that just mentions one of the configured words
+        """
         line = parsed_file.snippet(call).lower()
         return any(word in line for word in self._password_words)
 
     def _crypt_salt_is_weak(self, pf: ParsedFile, call: Node) -> bool:
-        """Checks if the password salt is weak or insecure"""
+        """Checks if the password salt is weak or insecure as per config"""
         args = _call_args(call)
 
         if len(args) < 2:
-            return True  # no salt
+            return True  # no salt at all, PHP falls back to the weakest algorithm
 
+        # A salt that is computed at runtime cannot be judged here
+        # It is left alone rather than reported,
+        # so a correct dynamic salt does not become a false positive
         salt = args[1]
         if salt.type not in ("string", "encapsed_string") or _contains_variable(salt):
             return False
@@ -175,7 +203,12 @@ class A04CryptoFailuresModule(ScannerModule):
         return not _string_content(pf, salt).startswith(self._strong_salts)
 
     def _uses_weak_cipher(self, parsed_file: ParsedFile, call: Node) -> bool:
-        """Checks if a weak cipher is used"""
+        """Checks if a weak cipher is used
+
+        The cipher sits at a different position in every openssl_* function,
+        so instead of relying on positions for every function,
+        every string argument is checked for a broken cipher or mode.
+        """
         for arg in _call_args(call):
             if arg.type in ("string", "encapsed_string"):
                 tokens = set(_TOKEN_REGEX.split(_string_content(parsed_file, arg).lower()))
@@ -186,7 +219,7 @@ class A04CryptoFailuresModule(ScannerModule):
     def _check_define_secret(
         self, parsed_file: ParsedFile, context: ModuleContext, call: Node, findings: list[Finding]
     ) -> None:
-        """Checks if there may be a secret assigned through define"""
+        """Checks if there may be a secret assigned through define (define('DB_PASSWORD', '...'))"""
         args = _call_args(call)
 
         if len(args) < 2 or args[0].type != "string" or args[1].type not in ("string", "encapsed_string"):
@@ -194,7 +227,7 @@ class A04CryptoFailuresModule(ScannerModule):
 
         name = _string_content(parsed_file, args[0]).lower()
         if any(word in name for word in self._secret_words) and not _contains_variable(args[1]):
-            # Check for the defined min length
+            # We check a min length for secrets, so placeholders are not reported
             if len(_string_content(parsed_file, args[1])) >= self._min_secret_length:
                 findings.append(self._finding("hardcoded_secret", parsed_file, context, call))
 
@@ -203,7 +236,13 @@ class A04CryptoFailuresModule(ScannerModule):
     def _check_assigned_secrets(
         self, parsed_file: ParsedFile, context: ModuleContext, findings: list[Finding]
     ) -> None:
-        """Checks if there may be a secret assigned"""
+        """Checks if there may be a secret assigned
+
+        A string literal is not suspicious on its own,
+        so the decision is made by the name it is assigned to.
+        This makes this the most uncertain check in the module:
+        it only sees names, not what the value is used for
+        """
         for match in context.parsing.matches(parsed_file.root, _ASSIGN_QUERY):
             assign, left, value = match["assign"][0], match["left"][0], match["value"][0]
             name = parsed_file.text(left).lower()
